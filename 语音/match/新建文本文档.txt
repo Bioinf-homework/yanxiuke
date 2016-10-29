@@ -1,0 +1,39 @@
+The distance to No.1 is:  58.6174
+The distance to No.2 is:  0
+The distance to No.3 is:  76.5506
+The distance to No.4 is:  43.3705
+The distance to No.5 is:  66.4304
+The distance to No.6 is:  66.7083
+The distance to No.7 is:  60.7783
+The distance to No.8 is:  54.3323
+2242.98
+1966.19
+3832.29
+5699.97
+7258.14
+9256.74
+11112.8
+64653
+2       1966.19
+
+
+
+7
+
+The distance to No.1 is:  59.9333
+The distance to No.2 is:  60.7783
+The distance to No.3 is:  60.6218
+The distance to No.4 is:  57.0175
+The distance to No.5 is:  49.9199
+The distance to No.6 is:  62.1772
+The distance to No.7 is:  0
+The distance to No.8 is:  51.0196
+2064.44
+4392.1
+6261
+8196.98
+10460.9
+12261.2
+11766.6
+55481
+1       2064.44

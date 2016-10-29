@@ -1,0 +1,7 @@
+# depslib dependency file v1.0
+1449040906 source:d:\c program\match\main.cpp
+	<iostream>
+	<stdio.h>
+	<math.h>
+	<stdlib.h>
+
