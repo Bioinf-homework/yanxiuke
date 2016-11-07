@@ -1,0 +1,94 @@
+#define VECTOR_ORDER   22   //矢量维数
+#define MAXWAVEBLOCK  100//输入内存块数
+#define MAXWAVEBUFFER 320//每块内存大小 20ms
+#define MAXFRAME   3000   //1分钟语音
+#define  LpcOrder       10  //Lpc系数维数
+#define LpccOrder       10  //Lpcc系数维数
+#define LpcOrderP1         (LpcOrder+1)
+#define  Frame       240
+
+
+typedef struct{
+	double En,PrevEn,En_Deta;
+	double Lpc[LpcOrder];
+	double PrevLpcc[LpccOrder];
+	double Lpcc[LpccOrder];
+	double Lpcc_Deta[LpccOrder]; 
+}LpccStru;
+
+
+//数据文件
+typedef struct {
+ int position;    //结尾指针
+ double threshold; //门限
+ double acoeff;    //平均系数
+ double mcoeff;    //最大系数
+ BYTE  speakernum; //话着数量
+ BYTE  textnum;    //文本数量
+ char text[10][40];//文本内容
+}DataHDR;
+
+//计算用结构
+typedef double * Vector;
+
+typedef struct {
+	double sdis; //累计距离
+	BYTE path;   //回溯路径 1-水平 2-垂直  3-对角
+	BYTE hcount; //水平回溯计数
+	double hdis; //水平回溯均值
+} DTWStru;
+
+typedef struct 
+{
+	CTime start; //开始时间
+	BYTE bflag;  //开始标志
+	BYTE cnt;    //无音累计
+    char pre[MAXWAVEBUFFER/2];  //帧叠部分
+}CheckStru; 
+
+
+typedef struct {
+   char name[10]; //话者姓名
+   BYTE flag;     //标志位  b0-占用标志  b1-训练标志 
+   double adis[10];   //平均距离
+   double mdis[10];   //最大距离
+   int modelstart1[10];  //模板1起始点
+   int modelstart2[10];  //模板1起始点
+   int modelstart3[10];  //模板1起始点
+   int modellen1[10];  //模板1长度
+   int modellen2[10];  //模板1长度
+   int modellen3[10];  //模板1长度
+}DataIndex;
+
+typedef struct
+{
+	Vector frame[MAXFRAME]; //矢量存储区
+	int framenum;//实际帧数
+}VectorStru;   //矢量存储区
+
+typedef struct{
+	Vector model1[MAXFRAME];
+	int framenum1;
+    Vector model2[MAXFRAME];
+	int framenum2;
+	Vector model3[MAXFRAME];
+	int framenum3;
+}ModelStru; //模板存储区  
+
+
+//接口参数
+typedef struct workinfo{
+    HWND upwinhd;   //主线程窗口句柄
+	UINT workmsg;   //底层发送的信道消息字
+}WorkInfo;
+//上层命令缓冲区
+typedef struct upcommbuf
+{
+  BYTE writeptr; //写指针
+  BYTE readptr; //读指针
+  BYTE  commword[100];//命令字
+  DWORD commdata[100];//命令内容
+}UpCommBuf;
+
+
+

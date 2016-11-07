@@ -1,0 +1,1076 @@
+// dtw.cpp : Defines the initialization routines for the DLL.
+//
+
+#include "stdafx.h"
+#include "dtw.h"
+#include "math.h"
+#include "struct.h"
+#include "func.h"
+#include "mmsystem.h"
+#include "stdlib.h"
+
+
+
+static void CALLBACK waveInProc(HWAVEIN hwi, UINT uMsg, WORD dwInstance,
+						 WAVEHDR* dwParam1, DWORD dwParam2);
+
+//矢量各维加权
+float GValue[29]={1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0
+,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0};
+//DTW路径加权
+int WValue[3]={1,2,1};
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+
+
+//
+//	Note!
+//
+//		If this DLL is dynamically linked against the MFC
+//		DLLs, any functions exported from this DLL which
+//		call into MFC must have the AFX_MANAGE_STATE macro
+//		added at the very beginning of the function.
+//
+//		For example:
+//
+//		extern "C" BOOL PASCAL EXPORT ExportedFunction()
+//		{
+//			AFX_MANAGE_STATE(AfxGetStaticModuleState());
+//			// normal function body here
+//		}
+//
+//		It is very important that this macro appear in each
+//		function, prior to any calls into MFC.  This means that
+//		it must appear as the first statement within the 
+//		function, even before any object variable declarations
+//		as their constructors may generate calls into the MFC
+//		DLL.
+//
+//		Please see MFC Technical Notes 33 and 58 for additional
+//		details.
+//
+
+/////////////////////////////////////////////////////////////////////////////
+// CDtwApp
+
+BEGIN_MESSAGE_MAP(CDtwApp, CWinApp)
+	//{{AFX_MSG_MAP(CDtwApp)
+		// NOTE - the ClassWizard will add and remove mapping macros here.
+		//    DO NOT EDIT what you see in these blocks of generated code!
+	//}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+
+/////////////////////////////////////////////////////////////////////////////
+// CDtwApp construction
+
+CDtwApp::CDtwApp()
+{
+	// TODO: add construction code here,
+	// Place all significant initialization in InitInstance
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// The one and only CDtwApp object
+
+CDtwApp theApp;
+BYTE m_trainflag;  //训练操作标志
+BYTE m_recognitionflag;   //识别操作标志
+BYTE m_closeflag;    //退出标志
+
+DataHDR  m_datahdr;     //文件头数据块
+DataIndex m_dataindex;  //索引数据块
+ModelStru m_model;      //模板存储区
+VectorStru m_vector;    //矢量存储区
+LpccStru m_lpcc;        //特征计算存储区
+BYTE m_speakerno;       //当前话者编号
+BYTE m_textno;          //当前文本编号
+BYTE m_count;           //当前文本训练次数计数    
+FILE *fp,*fpw;               //数据文件指针
+WorkInfo *m_workinfo;   //工作信息表
+BYTE m_sound;
+BYTE m_sno;
+double m_mean;
+CString m_s;
+double m_aa;
+double m_mm;
+
+bool m_Opened;          //当前录音状态，false-停止录音  true-正在录音
+static WAVEHDR WaveHdrIn[MAXWAVEBLOCK];  //
+static char WaveInBuffer[MAXWAVEBLOCK][MAXWAVEBUFFER];//记录录音数据用内存块
+static HWAVEIN hWaveIn;
+BYTE m_thflag;
+double m_th;
+CheckStru cs;           //此结构用于实现语音起始位置和结束位置的检测
+
+
+
+void startwork(void * wi)
+{
+	m_trainflag=0;
+	m_recognitionflag=0;
+	m_closeflag=0;
+	m_workinfo=(WorkInfo *)wi;
+	m_model.framenum1=0;
+    m_model.framenum2=0;
+    m_model.framenum3=0;
+	m_vector.framenum=0;
+	m_sound=0;
+	m_thflag=0;
+	fpw=fopen("data.txt","wt");
+	AfxBeginThread(SpeakerFunction,NULL);
+}
+void train(BYTE speakerno)
+{
+   CString s;
+   char c[2]; int i;
+   m_speakerno=speakerno;
+   if((m_trainflag==1)||(m_recognitionflag==1)) return;
+   //初始化训练信息 
+   m_trainflag=1;
+   m_recognitionflag=0;
+
+   
+   cs.bflag=0;
+   cs.cnt=0;
+ 
+   m_textno=0;
+   m_count=1;
+   memset(cs.pre,0,MAXWAVEBUFFER/2);
+   m_lpcc.PrevEn=0;
+   for(i=0;i<LpccOrder;i++)
+	   m_lpcc.PrevLpcc[i]=0;
+   //读入文件头和索引
+   fseek(fp,0,SEEK_SET);
+   fread((void *)&m_datahdr,sizeof(DataHDR),1,fp);
+   fseek(fp,sizeof(DataHDR)+sizeof(DataIndex)*m_speakerno,SEEK_SET);
+   fread((void *)&m_dataindex,sizeof(DataIndex),1,fp);
+   clearmodelstru();
+   clearvectorstru();
+   m_thflag=1;
+   
+   //发同步提示信息
+   s=m_datahdr.text[m_textno];
+
+   s="文本 <<"+s+">> 第"+itoa(m_count,c,10)+"次训练，按确定键后开始输入语音";
+   MessageBox(0,LPCSTR(s),"训练开始",0);
+   //更新计数
+   
+   cs.start=cs.start.GetCurrentTime();
+   m_sound=1;
+   
+  
+}
+void recognition(BYTE speakerno)
+{
+   int i;
+   CString s;
+   CTime cc;
+   if((m_trainflag==1)||(m_recognitionflag==1)) return;
+   m_speakerno=speakerno;
+   m_speakerno=0; 
+   m_sno=99;
+   m_trainflag=0;
+   m_recognitionflag=1;
+  
+   cs.bflag=0;
+   cs.cnt=0;
+   memset(cs.pre,0,MAXWAVEBUFFER/2);
+   m_lpcc.PrevEn=0;
+   for(i=0;i<LpccOrder;i++)
+	   m_lpcc.PrevLpcc[i]=0;
+   //读入文件头,索引和模板 
+   fseek(fp,0,SEEK_SET);
+   fread((void *)&m_datahdr,sizeof(DataHDR),1,fp);
+   //fseek(fp,sizeof(DataHDR)+sizeof(DataIndex)*m_speakerno,SEEK_SET);
+   //fread((void *)&m_dataindex,sizeof(DataIndex),1,fp);
+   //随机确定提示文本
+   clearmodelstru();
+   clearvectorstru();
+   cc=cc.GetCurrentTime();
+   m_textno=cc.GetSecond();
+   m_textno%=m_datahdr.textnum;
+   //m_textno=4;
+   /*
+   fseek(fp,m_dataindex.modelstart1[m_textno],SEEK_SET);
+   //模板1
+   for(i=0;i<m_dataindex.modellen1[m_textno];i++)
+   {
+      m_model.model1[i]=new double[VECTOR_ORDER];
+	  fread((void *)m_model.model1[i],sizeof(double)*VECTOR_ORDER,1,fp);
+   }
+   m_model.framenum1=m_dataindex.modellen1[m_textno];
+   //模板2
+   fseek(fp,m_dataindex.modelstart2[m_textno],SEEK_SET);
+   for(i=0;i<m_dataindex.modellen2[m_textno];i++)
+   {
+      m_model.model2[i]=new double[VECTOR_ORDER];
+	  fread((void *)m_model.model2[i],sizeof(double)*VECTOR_ORDER,1,fp);
+   }
+   m_model.framenum2=m_dataindex.modellen2[m_textno];
+   //模板3
+    fseek(fp,m_dataindex.modelstart3[m_textno],SEEK_SET);
+   for(i=0;i<m_dataindex.modellen3[m_textno];i++)
+   {
+      m_model.model3[i]=new double[VECTOR_ORDER];
+	  fread((void *)m_model.model3[i],sizeof(double)*VECTOR_ORDER,1,fp);
+   }
+   m_model.framenum3=m_dataindex.modellen3[m_textno];
+   */
+    //发同步提示信息
+   m_thflag=1;
+   s=m_datahdr.text[m_textno];
+   s="提示文本:<< "+s+">>,按确定键后开始输入语音";
+   MessageBox(0,LPCSTR(s),"识别操作开始",0);
+   cs.start=cs.start.GetCurrentTime();
+   m_sound=1;
+   //记录开始时间
+}
+void stopwork()
+{
+	m_closeflag=1;
+	fclose(fpw);
+}
+double dtwmatch(Vector *model, int mlen, Vector *check,int clen)
+{
+     int i,j,k,l;
+	 DTWStru *g=new DTWStru[mlen*clen];
+ 	 double hd,vd,yd,temp;
+     //初始化DTWStru
+	 g[0].hdis=distance(check[0],model[0]);
+	 g[0].sdis=g[0].hdis;
+	 for(i=0;i<clen;i++)
+		 for(j=0;j<mlen;j++)
+		 {
+			 k=i*mlen+j;
+			 g[k].path=0;
+			 g[k].hcount=0;
+		 }
+	//计算j=0的点	
+	 for(i=1;i<clen;i++)
+	 {
+	     k=i*mlen;
+		 l=(i-1)*mlen;
+	 	 g[k].hdis=(distance(check[i],model[0])+g[l].hdis*(g[l].hcount+1))/(g[l].hcount+2);
+
+		 g[k].sdis=g[l].sdis-g[l].hdis+g[k].hdis;
+		 
+	     g[k].path=1;
+		 g[k].hcount=g[l].hcount+1;
+
+	 }
+	 //计算i=0的点
+	 for(j=1;j<mlen;j++)
+	 {
+		 g[j].hdis=distance(check[0],model[j]);
+         g[j].sdis=g[j-1].sdis+g[j].hdis;
+		 g[j].path=2;
+		 g[j].hcount=0;
+	 }
+	 
+	
+     //计算匹配网络
+	 for(i=1;i<clen;i++)
+       for(j=1;j<mlen;j++) 
+	   {
+		   k=i*mlen+j;
+		   g[k].hdis=distance(check[i],model[j]);
+		   l=(i-1)*mlen+(j-1);
+		   yd=g[l].sdis+g[k].hdis;//对角累计
+		   l=i*mlen+(j-1);
+		   vd=g[l].sdis+g[k].hdis;//垂直累计
+		   l=(i-1)*mlen+j;
+		   temp=(g[k].hdis+g[l].hdis*(g[l].hcount+1))/(g[l].hcount+2);
+		   hd=g[l].sdis-g[l].hdis+temp;//水平累计
+		   g[k].path=getmin(hd,vd,yd);
+		   
+		   if(g[k].path==1)
+		   {
+                       g[k].hdis=temp;
+		       g[k].sdis=hd;
+		       g[k].hcount=g[l].hcount+1;  
+		   }
+		   else
+		   {
+		
+		       if(g[k].path==2)
+			       g[k].sdis=vd;
+			   else
+                   g[k].sdis=yd; 
+		       g[k].hcount=0; 
+
+		   }//else
+	 }//for	
+	 temp=g[clen*mlen-1].sdis;
+	 delete g;
+	 return temp;
+
+}
+
+
+double distance(Vector a,Vector b)
+{
+    double dist=0.0;
+	for(int i=0;i<VECTOR_ORDER;i++)
+         dist+=pow((a[i]-b[i])*GValue[i],2);
+	
+	return (sqrt(dist));
+}
+
+BYTE getmin(double a,double b,double c)
+{
+             if((a<b)&&(a<c))
+				 return 1;
+			 else if(b<c)
+				 return 2;
+			 else 
+				 return 3;
+
+}
+UINT SpeakerFunction( LPVOID pParam )
+{
+    
+	long sta;
+	int i;
+	AFX_MANAGE_STATE(AfxGetStaticModuleState());
+	//初始化录音设备
+	WAVEFORMATEX waveFormatEx;
+	waveFormatEx.cbSize=0;
+	waveFormatEx.nAvgBytesPerSec=16000;
+	waveFormatEx.nBlockAlign=2;
+	waveFormatEx.nChannels=1;
+	waveFormatEx.nSamplesPerSec=8000;
+	waveFormatEx.wBitsPerSample=16;
+	waveFormatEx.wFormatTag=WAVE_FORMAT_PCM;
+        hWaveIn = NULL;
+	if(sta=waveInOpen(&hWaveIn, WAVE_MAPPER, &waveFormatEx, (unsigned long)waveInProc, 1L, CALLBACK_FUNCTION)) 
+	{
+	    MessageBox(0,"声卡设置失败","信息窗口",0);
+		return 1;//录音设备打开失败，可能声卡不支持全双工。
+	}
+	
+	
+	for(i=0;i < MAXWAVEBLOCK; i++)
+	{//增加录音内存
+		WaveHdrIn[i].lpData=WaveInBuffer[i];
+		WaveHdrIn[i].dwBufferLength=MAXWAVEBUFFER;
+		WaveHdrIn[i].dwFlags=0;
+		WaveHdrIn[i].dwUser=0;
+		if(waveInPrepareHeader(hWaveIn, &WaveHdrIn[i], sizeof(WAVEHDR)))
+		{//无法锁定该内存
+			closewave();
+			MessageBox(0,"声卡设置失败","信息窗口",0);
+			return 1;
+		}; 
+		if(waveInAddBuffer(hWaveIn,&WaveHdrIn[i],sizeof(WAVEHDR)))
+		{//无法增加该内存
+			closewave();
+			MessageBox(0,"声卡设置失败","信息窗口",0);
+			return 1;
+		}
+	}
+	 m_Opened=true;
+    waveInStart(hWaveIn);
+	
+    //打开数据文件
+    fp=fopen("spdata.dat","rb+");
+	if(fp==NULL) m_closeflag=1;
+    //通知上层，初始化成功
+	if(m_workinfo->workmsg!=0)
+	   PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,0,0);
+	//判断是否退出
+	while(!m_closeflag)
+		Sleep(100);
+	//关闭数据文件
+	if(fp!=NULL) fclose(fp);
+	//释放录音设备
+	  closewave();
+    //成功退出
+	if(m_workinfo->workmsg!=0)
+       PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,1,0);
+	//释放内存
+	clearmodelstru();
+	clearvectorstru();
+	return 0;
+}
+void closewave()
+{
+    m_Opened=false;
+	if(hWaveIn){
+		waveInStop(hWaveIn);//停止录音
+		waveInReset(hWaveIn);//清空录音缓存
+		waveInClose(hWaveIn);//关闭录音设备
+		hWaveIn = NULL;
+
+	}
+}
+void clearmodelstru()
+{
+   int i;
+	for(i=0;i<m_model.framenum1;i++)
+	   delete m_model.model1[i];
+   for(i=0;i<m_model.framenum2;i++)
+	   delete m_model.model2[i];
+   for(i=0;i<m_model.framenum3;i++)
+	   delete m_model.model3[i];
+   m_model.framenum1=0;
+   m_model.framenum2=0;
+   m_model.framenum3=0;
+}
+void clearvectorstru()
+{
+   for(int i=0;i<m_vector.framenum;i++)
+	   delete m_vector.frame[i]; 
+   m_vector.framenum=0;
+}
+
+
+
+static void CALLBACK waveInProc(HWAVEIN hwi, UINT uMsg, WORD dwInstance,
+						 WAVEHDR* dwParam1, DWORD dwParam2)
+{
+	long result;
+	char buffer[MAXWAVEBUFFER*3/2];
+	long buf_len;
+    int i;
+  
+	switch(uMsg)
+	{//判断回调类型
+	case WIM_OPEN:
+		//录音设备正常打开时，触发该事件
+		//MessageBox(NULL,"Open success", "提示", MB_OK);
+		break;
+	case WIM_CLOSE:
+		//录音设备正常关闭时，触发该事件
+		//MessageBox(NULL,"Close success", "提示", MB_OK);
+		break;
+	case WIM_DATA:
+		//录音设备返回数据时，触发该事件
+		if(!waveInUnprepareHeader(hwi, dwParam1,sizeof(WAVEHDR)))
+		{//可以释放内存。有的情况虽然返回数据，但不能释放内存，
+		 //如使用同一个WAVEHDR增加多个内存块时，会出现上述情况
+			
+			buf_len = dwParam1->dwBytesRecorded;//记录录音数据长度
+			memcpy(buffer+MAXWAVEBUFFER/2, dwParam1->lpData , buf_len);//复制返回数据
+			dwParam1->dwUser=0;//恢复设置
+			dwParam1->dwBufferLength=MAXWAVEBUFFER;
+			dwParam1->dwFlags=0;
+			if(m_Opened)
+			{
+				result=waveInPrepareHeader(hwi,dwParam1,sizeof(WAVEHDR));
+ 				result=waveInAddBuffer(hwi,dwParam1,sizeof(WAVEHDR));
+				if(m_sound)
+				{
+					memcpy(buffer,cs.pre,MAXWAVEBUFFER/2);
+					if(buf_len<MAXWAVEBUFFER)
+						 memset(buffer+MAXWAVEBUFFER/2+buf_len,0,MAXWAVEBUFFER-buf_len);
+					memcpy(cs.pre,buffer+MAXWAVEBUFFER,MAXWAVEBUFFER/2);
+				
+					//lpc计算
+					Comp_Lpc(m_lpcc.Lpc,(short *)buffer,&m_lpcc.En);
+					
+					//计算lpcc
+					Comp_Lpcc(m_lpcc.Lpc,m_lpcc.Lpcc);
+					for(i=0;i<LpccOrder;i++)
+					{
+						m_lpcc.Lpcc_Deta[i]=(m_lpcc.Lpcc[i]-m_lpcc.PrevLpcc[i])*1.0;
+						m_lpcc.PrevLpcc[i]=m_lpcc.Lpcc[i];
+					}
+					m_lpcc.En=log10(m_lpcc.En)*0.15;
+					m_lpcc.En_Deta=m_lpcc.En-m_lpcc.PrevEn;
+					m_lpcc.PrevEn=m_lpcc.En;
+					if(m_thflag==1)
+					{
+						m_th=m_lpcc.En+0.15;
+						m_thflag=0;
+						if(m_th>0.9)
+							m_th=0.9;
+					}
+					//端点检测
+					result=beginendcheck(m_lpcc.En);
+					
+					////
+					if(m_recognitionflag)
+						 dealrecognition(result);
+					else if(m_trainflag)
+						 dealtrain(result);
+					//===识别
+				}//if sound 				
+			
+			}//m_opened
+		}//if unprepare suceessed
+		
+		break;
+	}
+}
+
+BYTE beginendcheck(double en)
+{
+   CTimeSpan ctsp(60);
+   CTime ct;
+   ct=ct.GetCurrentTime();
+   //超时
+   if(ct-cs.start>ctsp)	return 3;
+   if(!cs.bflag)
+   {
+	   if(en>m_th)
+	   {
+	        
+		     cs.bflag=1;
+			 cs.cnt=0;
+	         return 1;  //开始
+	   }
+   }
+   else
+   {
+     if(en<=m_th)
+	 	      cs.cnt++;
+	 else
+		     cs.cnt=0;
+	 if(cs.cnt==25)
+	 {
+           
+		    cs.bflag=0;
+			cs.cnt=0;
+	        return 2;  //结束 
+	 }
+   }
+   return 4; //中间点
+
+}
+
+////////////////////////////////////////////////////特征提取
+void Comp_Lpc(double *Lpc,short *RdBuf,double *en)
+{
+	double data[Frame],da[Frame];
+	int j;
+	for(j=1;j<Frame;j++)
+	{
+		data[j]=(double)RdBuf[j]-0.93*(double)RdBuf[j-1];
+		da[j]=data[j];
+	}
+	data[0]=(double)RdBuf[0];
+	MultiHamming(data);
+	AutoCorrelate(Frame,data,10,Lpc,1,en);
+}
+
+
+void MultiHamming(double *data)
+{
+	double twopi;
+	double Hamming[Frame];
+	twopi=8.0F*atan(1.0F);
+	for(int i=0;i<Frame;i++)
+	{
+		Hamming[i]=(double)(0.54-0.46*cos((double)i*twopi/(double)(Frame-1)));
+		 data[i]*=Hamming[i];
+    } 
+	twopi=0.0;
+}
+
+
+void Comp_Lpcc(double* Lpc,double *Lpcc)
+{
+    int i,j,c;
+	Lpcc[0]=Lpc[0];  
+	for(i=2;i<=LpccOrder;i++)
+	{
+		if(i>=LpcOrder)
+		{
+			Lpcc[i-1]=0.0;
+			c=LpcOrder;
+		}
+		else
+		{
+		    Lpcc[i-1]=Lpc[i-1];
+			c=i;
+		}
+		for(j=1;j<=c-1;j++)
+			Lpcc[i-1]+=Lpcc[j-1]*Lpc[c-j-1]*(1-(double)(j/c));
+		
+	}
+
+}
+int AutoCorrelate(int n,double *da,int order,double *lpc,int mark,double *en)
+{
+    register int i,j;
+	double r[LpcOrder+1],e[LpcOrder+1],k[LpcOrder+1],aa[LpcOrder+1][LpcOrder+1],sum;
+    for(i=0;i<LpcOrder+1;i++)
+	{
+		r[i]=0.0;
+		e[i]=0.0;
+		k[i]=0.0;
+	}
+	for(i=0;i<LpcOrder+1;i++)
+		for(j=0;j<LpcOrder+1;j++)
+			aa[i][j]=0.0;
+	for(j=0;j<=order;j++)
+	{
+         r[j]=0.0;
+         for(i=0;i<n-j;i++)
+			 r[j]+=da[i]*da[i+j];
+	}
+	e[0]=r[0];
+	aa[1][1]=r[1]/(r[0]+0.00001);
+	k[1]=r[1]/(e[0]+0.00001);
+	e[1]=(1.0-k[1]*k[1])*e[0];
+	for(i=2;i<=order;i++)
+	{
+		sum=0.0;
+		for(j=1;j<=i-1;j++)
+			sum+=aa[i-1][j]*r[i-j];
+		if(e[i-1]==0.0) return(-1);
+		k[i]=(r[i]-sum)/e[i-1];
+		aa[i][i]=k[i];
+		for(j=1;j<=i-1;j++)
+			aa[i][j]=aa[i-1][j]-k[i]*aa[i-1][i-j];
+		e[i]=(1.0-k[i]*k[i])*e[i-1];
+	}
+	sum=0;
+	for(j=1;j<=order;j++)
+	{
+		lpc[j-1]=aa[order][j];
+		sum+=lpc[j-1]*r[j];
+	}
+	*en=r[0]-sum;
+	
+	return 0;
+}
+/////////////////////////////////////////
+void dealrecognition(int result)
+{
+	int i;
+
+	double mean;
+	double *f;
+	CString s;
+
+	if(result==2)
+	{
+	    
+		    if(m_vector.framenum-25<50)
+			{
+				cs.bflag=0;
+			    cs.cnt=0;
+			    clearvectorstru();
+			} 
+			else
+			{
+		       m_sound=0; 
+			   cs.bflag=0;
+			   cs.cnt=0;
+			   mean=1.0;
+			   other(mean);
+			   clearvectorstru();
+			   clearmodelstru();
+			   if(m_sno==99)
+				{
+					s="声纹鉴别结果:  说话人的身份无法确认";         
+					MessageBox(0,LPCSTR(s),"鉴别结果",0); 
+					if(m_workinfo->workmsg!=0)
+					   PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,2,1);     
+			   }
+				else if((m_aa>m_datahdr.acoeff)||(m_mm>m_datahdr.mcoeff))
+				{
+					 s="说话人可能是<<"+m_s+" >>,但声纹匹配程度不高,请重新进行识别操作";
+					MessageBox(0,LPCSTR(s),"鉴别结果",0);
+				     //识别完成
+				     if(m_workinfo->workmsg!=0)
+						PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,2,0);
+
+				}  
+				else
+				{
+					s="声纹鉴别结果: 身份已确认,说话人为<< "+m_s+" >>";
+				   MessageBox(0,LPCSTR(s),"鉴别结果",0);
+				   //识别完成
+				   if(m_workinfo->workmsg!=0)
+						PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,4,(int)m_sno);
+				}
+                m_recognitionflag=0;
+
+			}
+		    
+	
+	}//if 结束标志
+    else if(result==3)
+	{
+	    m_sound=0;
+		cs.bflag=0;
+		cs.cnt=0;
+		MessageBox(0,"未完成声音鉴别过程，超时退出","鉴别结果",0); 
+		if(m_workinfo->workmsg!=0)
+			PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,2,2);
+		clearvectorstru();
+		clearmodelstru();
+        m_recognitionflag=0;
+
+	}
+	else
+	{
+		if(result==1)
+			cs.bflag=1;
+		if(cs.bflag==1)
+		{
+			m_vector.frame[m_vector.framenum]=new double[VECTOR_ORDER];
+			f=m_vector.frame[m_vector.framenum];
+			for(i=0;i<LpccOrder;i++)
+			{
+                  f[i]=m_lpcc.Lpcc[i];
+			      f[i+LpccOrder]=m_lpcc.Lpcc_Deta[i];
+			}
+			f[VECTOR_ORDER-2]=m_lpcc.En;
+			f[VECTOR_ORDER-1]=m_lpcc.En_Deta;
+			m_vector.framenum++;
+		}
+	}
+
+
+}
+
+void dealtrain(int result)
+{
+   	int ret,i;
+	double *f;
+	if(result==2)
+	{
+		//长度检查
+		cs.bflag=0;
+		cs.cnt=0;
+		
+		if(m_vector.framenum-25<50)
+		{
+		    clearvectorstru();
+			return;
+		}
+		m_sound=0;
+		
+     	switch(m_count)
+		{
+		case 1:
+			 for(i=0;i<m_vector.framenum;i++)
+			    m_model.model1[i]=m_vector.frame[i];
+			 m_model.framenum1=m_vector.framenum;
+             m_vector.framenum=0;
+			 m_count++;
+			break;
+		case 2:
+			for(i=0;i<m_vector.framenum;i++)
+				m_model.model2[i]=m_vector.frame[i];
+			 m_model.framenum2=m_vector.framenum;
+             m_vector.framenum=0;
+			 m_count++;
+			break;
+		case 3:
+			 for(i=0;i<m_vector.framenum;i++)
+					m_model.model3[i]=m_vector.frame[i];
+			 m_model.framenum3=m_vector.framenum;
+			 m_vector.framenum=0;
+             ret=checkmodel();
+			 if(ret==1)
+			 {
+				MessageBox(0,"得到的训练语音不合格，请重新输入","训练结果",0);
+			    if(m_workinfo->workmsg!=0)
+					PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,3,1); 
+				clearmodelstru();
+				m_trainflag=0;
+				return;
+			 }
+			 //写模板
+              fseek(fp,m_datahdr.position,SEEK_SET);
+			  //模板1负值
+			  m_dataindex.modelstart1[m_textno]=m_datahdr.position;
+			  m_dataindex.modellen1[m_textno]=m_model.framenum1-25;
+			  for(i=0;i<m_model.framenum1-25;i++)
+				  fwrite(m_model.model1[i],VECTOR_ORDER*sizeof(double),1,fp);
+			  m_datahdr.position+=(m_model.framenum1-25)*VECTOR_ORDER*sizeof(double);
+              
+			  //模板2
+			  m_dataindex.modelstart2[m_textno]=m_datahdr.position;
+			  m_dataindex.modellen2[m_textno]=m_model.framenum2-25;
+			  for(i=0;i<m_model.framenum2-25;i++)
+				  fwrite(m_model.model2[i],VECTOR_ORDER*sizeof(double),1,fp);
+			  m_datahdr.position+=(m_model.framenum2-25)*VECTOR_ORDER*sizeof(double);
+              
+			  //模板3
+			  m_dataindex.modelstart3[m_textno]=m_datahdr.position;
+			  m_dataindex.modellen3[m_textno]=m_model.framenum3-25;
+			  for(i=0;i<m_model.framenum3-25;i++)
+				  fwrite(m_model.model3[i],VECTOR_ORDER*sizeof(double),1,fp);
+			  m_datahdr.position+=(m_model.framenum3-25)*VECTOR_ORDER*sizeof(double);
+  
+			 //清除存储空间
+			 clearmodelstru();
+             
+
+			 if(m_textno==m_datahdr.textnum-1)
+			 {
+                 //完成数据文件的处理
+				 m_dataindex.flag=3;
+                 fseek(fp,0,SEEK_SET);
+				 fwrite(&(m_datahdr.position),4,1,fp);
+				 fseek(fp,sizeof(DataHDR)+m_speakerno*sizeof(DataIndex),SEEK_SET);
+				 fwrite(&(m_dataindex),sizeof(DataIndex),1,fp);
+				 fflush(fp);
+                 
+				 MessageBox(0,"训练数据处理完毕","训练结果",0);
+				 if(m_workinfo->workmsg!=0)
+					PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,3,0); 
+                 m_trainflag=0;
+				 return;
+			 }
+			 else
+			 {
+				  m_textno++;
+				  m_count=1;
+			 }
+		     
+			 break;
+		}
+	
+	    //定时重启
+	   AfxBeginThread(ResetFunction,NULL);
+	}//if result=2
+	else if(result==3)
+	{
+		m_sound=0;
+		cs.bflag=0;
+		cs.cnt=0;
+		MessageBox(0,"未完成声音训练过程，超时退出","鉴别结果",0); 
+		if(m_workinfo->workmsg!=0)
+			PostMessage(m_workinfo->upwinhd,m_workinfo->workmsg,3,2);
+		clearvectorstru();
+		clearmodelstru();
+		m_trainflag=0;
+     }
+	else
+	{
+		if(result==1)
+			cs.bflag=1;
+		if(cs.bflag==1)
+		{
+			m_vector.frame[m_vector.framenum]=new double[VECTOR_ORDER];
+			f=m_vector.frame[m_vector.framenum];
+			for(i=0;i<LpccOrder;i++)
+			{
+                  f[i]=m_lpcc.Lpcc[i];
+			      f[i+LpccOrder]=m_lpcc.Lpcc_Deta[i];
+			}
+			f[VECTOR_ORDER-2]=m_lpcc.En;
+			f[VECTOR_ORDER-1]=m_lpcc.En_Deta;
+			m_vector.framenum++;
+		}
+	}
+
+ 
+}
+
+double getmean(double d1,double d2,double d3)
+{
+	return((d1+d2+d3)/3);
+}
+double getmax(double d1,double d2,double d3)
+{
+	if((d1<d2)&&(d1<d3))
+		return d1;
+	else if(d2<d3)
+		return d2;
+	else
+		return d3;
+}
+int checkmodel()
+{
+  double k1,k2,k3;
+  double mean,max;
+  int a=(m_model.framenum1+m_model.framenum2+m_model.framenum3-25*3)/3;
+  if(abs(m_model.framenum1-a-25)>a/3) return 1;
+  if(abs(m_model.framenum2-a-25)>a/3) return 1;
+  if(abs(m_model.framenum3-a-25)>a/3) return 1;
+  k1=dtwmatch(m_model.model2,m_model.framenum2-25,m_model.model1,m_model.framenum1-25);
+  k2=dtwmatch(m_model.model1,m_model.framenum1-25,m_model.model3,m_model.framenum3-25);
+  k3=dtwmatch(m_model.model3,m_model.framenum3-25,m_model.model2,m_model.framenum2-25);
+  mean=getmean(k1/(m_model.framenum2-25),k2/(m_model.framenum1-25),k3/(m_model.framenum3-25));
+  max=getmax(k1/(m_model.framenum2-25),k2/(m_model.framenum1-25),k3/(m_model.framenum3-25));
+  m_dataindex.adis[m_textno]=mean;
+  m_dataindex.mdis[m_textno]=max;
+  double t1=k1/(m_model.framenum2-25);
+  double t2=k2/(m_model.framenum1-25);
+  double t3=k3/(m_model.framenum3-25);
+  fprintf(fpw,"第%d个文本\n",m_textno);
+  fprintf(fpw,"%e , %e , %e\n",k1/(m_model.framenum2-25),k2/(m_model.framenum1-25),k3/(m_model.framenum3-25));
+  fprintf(fpw,"%e , %e\n",mean,max);
+  t1=(fabs(t1-t2)+fabs(t3-t2)+fabs(t3-t1))/3;
+  fprintf(fpw,"%e\n",t1);
+  fprintf(fpw,"\n");
+    return 0;
+}
+UINT ResetFunction( LPVOID pParam )
+{
+    CString s;
+    char c[2];
+	Sleep(100);
+	int i;
+   memset(cs.pre,0,MAXWAVEBUFFER/2);
+   m_lpcc.PrevEn=0;
+   for(i=0;i<LpccOrder;i++)
+	   m_lpcc.PrevLpcc[i]=0;
+   
+	//发同步提示信息
+   s=m_datahdr.text[m_textno];
+   s="文本<< "+s+" >>第"+itoa(m_count,c,10)+"次训练，按确定键后开始输入语音";
+   MessageBox(0,LPCSTR(s),"训练开始",0);
+   //更新计数
+   cs.start=cs.start.GetCurrentTime();
+   m_sound=1;
+   return 0;
+
+}
+int other(double m)
+{
+	int i,j,a;
+	double k1,k2,k3,mean,max;
+	for(j=0;j<m_datahdr.speakernum;j++)
+	{
+		    
+            clearmodelstru();
+			fseek(fp,sizeof(DataHDR)+sizeof(DataIndex)*j,SEEK_SET);
+			fread((void *)&m_dataindex,sizeof(DataIndex),1,fp);
+			fseek(fp,m_dataindex.modelstart1[m_textno],SEEK_SET);
+	        if(m_dataindex.flag==3)
+			{
+			
+				m_model.framenum1=m_dataindex.modellen1[m_textno];
+				m_model.framenum2=m_dataindex.modellen2[m_textno];
+				m_model.framenum3=m_dataindex.modellen3[m_textno];
+				a=(m_model.framenum1+m_model.framenum2+m_model.framenum3)/3;
+				if(abs(m_vector.framenum-a-25)<=a/3)
+				{
+				
+					//模板1
+				   for(i=0;i<m_dataindex.modellen1[m_textno];i++)
+				   {
+					  m_model.model1[i]=new double[VECTOR_ORDER];
+					  fread((void *)m_model.model1[i],sizeof(double)*VECTOR_ORDER,1,fp);
+				   }
+				   
+				   //模板2
+				   fseek(fp,m_dataindex.modelstart2[m_textno],SEEK_SET);
+				   for(i=0;i<m_dataindex.modellen2[m_textno];i++)
+				   {
+					  m_model.model2[i]=new double[VECTOR_ORDER];
+					  fread((void *)m_model.model2[i],sizeof(double)*VECTOR_ORDER,1,fp);
+				   }
+				   
+				   //模板3
+				   fseek(fp,m_dataindex.modelstart3[m_textno],SEEK_SET);
+				   for(i=0;i<m_dataindex.modellen3[m_textno];i++)
+				   {
+					  m_model.model3[i]=new double[VECTOR_ORDER];
+					  fread((void *)m_model.model3[i],sizeof(double)*VECTOR_ORDER,1,fp);
+				   }
+					k1=dtwmatch(m_model.model1,m_model.framenum1,m_vector.frame,m_vector.framenum-25);
+					k2=dtwmatch(m_model.model2,m_model.framenum2,m_vector.frame,m_vector.framenum-25);
+					k3=dtwmatch(m_model.model3,m_model.framenum3,m_vector.frame,m_vector.framenum-25); 
+					mean=getmean(k1/m_model.framenum1,k2/m_model.framenum2,k3/m_model.framenum3);
+					max=getmax(k1/m_model.framenum1,k2/m_model.framenum2,k3/m_model.framenum3);
+					
+					double t1=k1/(m_model.framenum1-25);
+                    double t2=k2/(m_model.framenum2-25);
+                    double t3=k3/(m_model.framenum3-25);
+  
+					fprintf(fpw,"第%d个文本recognition\n",m_textno);
+					fprintf(fpw,"话者编号%d\n",j);
+                    fprintf(fpw,"%e , %e , %e\n",k1/(m_model.framenum1-25),k2/(m_model.framenum2-25),k3/(m_model.framenum3-25));
+                    fprintf(fpw,"%e , %e\n",mean,max);
+                    t1=(fabs(t1-t2)+fabs(t3-t2)+fabs(t3-t1))/3;
+                    fprintf(fpw,"%e\n",t1);
+					fprintf(fpw,"%e ,%e\n",mean/m_dataindex.adis[m_textno],max/m_dataindex.mdis[m_textno]);
+                    fprintf(fpw,"\n");
+                    
+					if((mean<m_dataindex.adis[m_textno]*1.29)&&(max<m_dataindex.mdis[m_textno]*1.28))
+					{
+						if((m_sno==99)||(max<m_mean))
+						{
+							
+							m_mean=max;
+							m_s=m_dataindex.name;
+							m_sno=j;
+							m_aa=mean/m_dataindex.adis[m_textno];
+							m_mm=max/m_dataindex.mdis[m_textno];
+						}
+					}
+					
+				}//长度在范围内
+				else
+				{
+					m_model.framenum1=0;
+				    m_model.framenum2=0;
+				    m_model.framenum3=0;
+
+				}
+		   }//if(训练)			
+	}//for
+	return 0;
+}
+void addspeaker(char *name)
+{
+   char s[10];
+   BYTE f=0;
+   DataHDR dr;
+   strcpy(s,name);
+   fseek(fp,0,SEEK_SET);
+   fread(&dr,sizeof(DataHDR),1,fp);
+   BYTE num=dr.speakernum;
+   num++;
+   fseek(fp,sizeof(int)+sizeof(double)*3,SEEK_SET);
+   fwrite(&num,1,1,fp);
+   fseek(fp,sizeof(DataHDR)+(num-1)*sizeof(DataIndex),SEEK_SET);
+   fwrite(s,10,1,fp);
+   fwrite(&f,1,1,fp);
+
+}
+void delspeaker(BYTE speakerno)
+{
+   DataHDR dr;
+   DataIndex di;
+   BYTE f=0;
+   fseek(fp,0,SEEK_SET);
+   fread(&dr,sizeof(DataHDR),1,fp);
+   BYTE num=dr.speakernum;
+   if(num<=speakerno) return;
+   fseek(fp,sizeof(DataHDR)+(num-1)*sizeof(DataIndex),SEEK_SET);
+   fread(&di,sizeof(DataIndex),1,fp);
+   fseek(fp,sizeof(DataHDR)+speakerno*sizeof(DataIndex),SEEK_SET);
+   fwrite(&di,sizeof(DataIndex),1,fp);
+   fseek(fp,sizeof(DataHDR)+(num-1)*sizeof(DataIndex)+10,SEEK_SET);
+   fwrite(&f,1,1,fp);
+   num--;
+   fseek(fp,sizeof(int)+sizeof(double)*3,SEEK_SET);
+   fwrite(&num,1,1,fp);
+}
+
+BYTE listspeaker(char **list,BYTE *flag)
+{
+   DataHDR dr;
+   DataIndex di;
+   fseek(fp,0,SEEK_SET);
+   fread(&dr,sizeof(DataHDR),1,fp);
+   BYTE num=dr.speakernum;	
+
+   for(int i=0;i<num;i++)
+   {
+       fseek(fp,sizeof(DataHDR)+i*sizeof(DataIndex),SEEK_SET);
+	   fread(&di,sizeof(DataIndex),1,fp);
+	   list[i]=new char[10];
+	   memcpy(list[i],di.name,10);
+	   flag[i]=di.flag;
+   }
+   return num;	
+	
+	
+	
+}
